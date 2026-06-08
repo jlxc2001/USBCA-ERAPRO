@@ -1,60 +1,30 @@
-plugins {
-    id 'com.android.application'
-}
+plugins { id 'com.android.application' }
 
 android {
-    namespace 'com.jlxc.uvcai'
-    compileSdk 35
-
-
-    lint {
-        // 这是车机侧载 APK，不上架 Google Play。
-        // targetSdk 28 是为了兼容 Android 10 车机的 USB 权限行为；
-        // AGP 8 的 release 构建会把 targetSdk<33 当成 fatal lint，这里关闭该检查。
-        abortOnError false
-        checkReleaseBuilds false
-        disable 'ExpiredTargetSdkVersion'
-    }
+    namespace 'com.jlxc.mikucarlauncher'
+    compileSdk 34
 
     defaultConfig {
-        applicationId "com.jlxc.usbcaerapro"
-        minSdk 21
+        applicationId 'com.jlxc.mikucarlauncher'
+        minSdk 23
         targetSdk 28
-        versionCode 17
-        versionName "uvc-v17-framecallback-dummysurface"
+        versionCode 37
+        versionName '0.4.6-icon-pack-app-actions'
+    }
 
-        ndk {
-            // 你的车机疑似 32 位，先只出 32 位 APK，避免装错 ABI。
-            abiFilters "armeabi-v7a", "arm64-v8a"
+    // GitHub 网页上传不会自动删除旧文件。
+    // 如果仓库里残留旧版 a4ldashboard 代码，会因为缺少 ICarInfoService 编译失败。
+    // 这里仅排除旧代码目录，不删除任何素材，不改变当前 UI。
+    sourceSets {
+        main {
+            java {
+                exclude 'com/jlxc/a4ldashboard/**'
+            }
         }
     }
 
     compileOptions {
-        sourceCompatibility JavaVersion.VERSION_1_8
-        targetCompatibility JavaVersion.VERSION_1_8
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
     }
-
-    packaging {
-        jniLibs {
-            useLegacyPackaging true
-        }
-    }
-}
-
-// 解决 UVCAndroid 依赖链里 Kotlin 1.8.x 与旧 kotlin-stdlib-jdk7/jdk8 1.6.x 重复类冲突。
-// 这个 App 本身是 Java 写的，不需要 appcompat。
-configurations.configureEach {
-    resolutionStrategy {
-        force 'org.jetbrains.kotlin:kotlin-stdlib:1.8.22'
-        force 'org.jetbrains.kotlin:kotlin-stdlib-jdk7:1.8.22'
-        force 'org.jetbrains.kotlin:kotlin-stdlib-jdk8:1.8.22'
-    }
-}
-
-dependencies {
-    implementation('com.herohan:UVCAndroid:1.0.12') {
-        exclude group: 'org.jetbrains.kotlin', module: 'kotlin-stdlib-jdk7'
-        exclude group: 'org.jetbrains.kotlin', module: 'kotlin-stdlib-jdk8'
-    }
-    implementation 'org.jetbrains.kotlin:kotlin-stdlib:1.8.22'
 }
