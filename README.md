@@ -76,3 +76,15 @@ implementation 'com.herohan:UVCAndroid:1.0.12'
 - 打开设备时优先使用 `cameraHelper.getDeviceList()` 的设备对象
 - 若收到 `onCancel`，用 `UsbManager.hasPermission(device)` 二次确认
 - 如果系统实际已经授权，则忽略取消回调并继续 `openCamera()`
+
+
+## v7 compilefix-v2
+
+补回 `findFirstUvcDeviceByCameraHelperFirst()` 方法，修复 Javac 找不到符号导致编译失败。
+
+
+## v8 hardfix
+
+- 确认 `MainActivity.java` 内同时包含方法调用和方法定义：
+  - `findFirstUvcDeviceByCameraHelperFirst()`
+- Workflow 增加 `verify-mainactivity-source`，构建前会打印并检查该方法是否存在，避免旧文件/未覆盖文件继续参与编译。
