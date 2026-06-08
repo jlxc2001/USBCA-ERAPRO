@@ -10,8 +10,8 @@ android {
         applicationId "com.jlxc.usbcaerapro"
         minSdk 21
         targetSdk 28
-        versionCode 11
-        versionName "uvc-v11-new-package"
+        versionCode 12
+        versionName "uvc-v12-camera-permission"
 
         ndk {
             // 你的车机疑似 32 位，先只出 32 位 APK，避免装错 ABI。

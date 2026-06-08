@@ -1,6 +1,7 @@
 
 package com.jlxc.uvcai;
 
+import android.Manifest;
 import android.app.Activity;
 import android.app.PendingIntent;
 import android.content.BroadcastReceiver;
@@ -11,6 +12,7 @@ import android.graphics.Color;
 import android.hardware.usb.UsbDevice;
 import android.hardware.usb.UsbInterface;
 import android.hardware.usb.UsbManager;
+import android.content.pm.PackageManager;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
@@ -53,7 +55,8 @@ import java.util.List;
  */
 public class MainActivity extends Activity implements View.OnClickListener {
     private static final String TAG = "UVCAI-UVC";
-    private static final String ACTION_USB_PERMISSION = "com.jlxc.uvcai.USB_PERMISSION";
+    private static final String ACTION_USB_PERMISSION = "com.jlxc.usbcaerapro.USB_PERMISSION";
+    private static final int REQUEST_CAMERA_PERMISSION = 6258;
 
     private FrameLayout previewContainer;
     private AspectRatioSurfaceView cameraView;
@@ -124,22 +127,70 @@ public class MainActivity extends Activity implements View.OnClickListener {
 
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         buildUi();
-        registerUsbPermissionReceiver();
-
         workerThread = new HandlerThread("uvc-worker");
         workerThread.start();
         workerHandler = new Handler(workerThread.getLooper());
 
-        status("自管权限版。先点“启动UVC引擎”，再点“打开UVC”。如果系统弹窗，请点允许。");
+        status("v12 相机权限版。重点：必须先允许相机权限，否则系统会拒绝 UVC 设备 USB 授权。先点“启动UVC引擎”。");
+
+        // 如果 USB 权限结果通过 PendingIntent.getActivity() 回到当前 Activity，这里处理一次。
+        handleUsbPermissionIntent(getIntent());
+        handleUsbAttachIntent(getIntent());
+    }
+
+    @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+        handleUsbPermissionIntent(intent);
+        handleUsbAttachIntent(intent);
+    }
+
+    private void handleUsbPermissionIntent(Intent intent) {
+        if (intent == null || !ACTION_USB_PERMISSION.equals(intent.getAction())) {
+            return;
+        }
+
+        final UsbDevice device = intent.getParcelableExtra(UsbManager.EXTRA_DEVICE);
+        final boolean granted = intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false);
+
+        if (device == null) {
+            opening = false;
+            openButtonPostEnabled(true);
+            status("USB 权限结果异常：device=null。请拔插摄像头后重试。");
+            return;
+        }
+
+        if (!granted) {
+            opening = false;
+            openButtonPostEnabled(true);
+            status("系统返回 USB 权限被拒绝：" + safeDeviceName(device) + "。如果你没有看到真正的权限弹窗，请拔插摄像头，或先卸载/停用其它 USB Camera App 的默认打开设置。");
+            return;
+        }
+
+        currentDevice = device;
+        status("系统 USB 权限已授权：" + safeDeviceName(device) + "，继续打开 UVC...");
+        selectDeviceAfterSystemPermission(device);
+    }
+
+
+    private void handleUsbAttachIntent(Intent intent) {
+        if (intent == null || !UsbManager.ACTION_USB_DEVICE_ATTACHED.equals(intent.getAction())) {
+            return;
+        }
+
+        final UsbDevice device = intent.getParcelableExtra(UsbManager.EXTRA_DEVICE);
+        if (device == null) {
+            status("收到 USB 插入事件，但 device=null。请点“打开UVC”手动枚举。");
+            return;
+        }
+
+        currentDevice = device;
+        status("系统已把 USB 设备交给本 App：" + safeDeviceName(device) + "。请点“启动UVC引擎”，然后点“打开UVC”。");
     }
 
     @Override
     protected void onDestroy() {
-        try {
-            unregisterReceiver(usbPermissionReceiver);
-        } catch (Throwable ignored) {
-        }
-
         releaseCameraHelper();
 
         if (workerThread != null) {
@@ -166,7 +217,7 @@ public class MainActivity extends Activity implements View.OnClickListener {
         root.setBackgroundColor(Color.BLACK);
 
         TextView title = new TextView(this);
-        title.setText("UVCAI UVC 直连 - 自管权限版");
+        title.setText("USBCA-ERAPRO UVC v12 - 相机权限版");
         title.setTextColor(Color.WHITE);
         title.setTextSize(20f);
         title.setGravity(Gravity.CENTER_VERTICAL);
@@ -275,7 +326,48 @@ public class MainActivity extends Activity implements View.OnClickListener {
         }
     };
 
+
+    private boolean hasCameraRuntimePermission() {
+        if (Build.VERSION.SDK_INT < 23) {
+            return true;
+        }
+        return checkSelfPermission(Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED;
+    }
+
+    private boolean ensureCameraPermissionThenStop(String reason) {
+        if (hasCameraRuntimePermission()) {
+            return true;
+        }
+
+        status("需要先授予相机权限，否则系统会拒绝 UVC 摄像头 USB 权限：" + reason);
+
+        if (Build.VERSION.SDK_INT >= 23) {
+            requestPermissions(new String[]{Manifest.permission.CAMERA}, REQUEST_CAMERA_PERMISSION);
+        }
+
+        return false;
+    }
+
+    @Override
+    public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+
+        if (requestCode == REQUEST_CAMERA_PERMISSION) {
+            if (grantResults != null
+                    && grantResults.length > 0
+                    && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
+                status("相机权限已授权。现在点“启动UVC引擎”，再点“打开UVC”。");
+            } else {
+                status("相机权限被拒绝：Android 会拒绝 USB Video Class 设备授权。请到应用权限里允许相机。");
+            }
+        }
+    }
+
     private void startUvcEngineSafe() {
+        if (!ensureCameraPermissionThenStop("启动UVC引擎")) {
+            return;
+        }
+
         if (helperStarted || cameraHelper != null) {
             status("UVC 引擎已启动。现在可以点“打开UVC”。");
             return;
@@ -354,6 +446,12 @@ public class MainActivity extends Activity implements View.OnClickListener {
     }
 
     private void openUvcAsync() {
+        if (!ensureCameraPermissionThenStop("打开UVC")) {
+            opening = false;
+            openButtonPostEnabled(true);
+            return;
+        }
+
         if (!helperStarted || cameraHelper == null) {
             status("请先点“启动UVC引擎”。");
             return;
@@ -373,7 +471,7 @@ public class MainActivity extends Activity implements View.OnClickListener {
         runUvcJob("openUvcAsync", new Runnable() {
             @Override
             public void run() {
-                final UsbDevice device = findFirstUvcDeviceBySystemUsbManager();
+                final UsbDevice device = currentDevice != null ? currentDevice : findFirstUvcDeviceBySystemUsbManager();
                 if (device == null) {
                     postOpenFailed(token, "系统 USB 列表里没找到 UVC 摄像头。请确认摄像头已插入、USB Host 正常。");
                     return;
@@ -425,13 +523,17 @@ public class MainActivity extends Activity implements View.OnClickListener {
                 flags |= PendingIntent.FLAG_MUTABLE;
             }
 
-            Intent intent = new Intent(ACTION_USB_PERMISSION);
-            intent.setPackage(getPackageName());
+            // 关键改动：
+            // 不再用 Broadcast PendingIntent。部分车机对 USB 权限广播会直接返回 denied 或不弹窗。
+            // 改用 Activity PendingIntent，把授权结果回到 onNewIntent()。
+            Intent intent = new Intent(this, MainActivity.class);
+            intent.setAction(ACTION_USB_PERMISSION);
+            intent.addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP | Intent.FLAG_ACTIVITY_CLEAR_TOP);
 
-            PendingIntent pendingIntent = PendingIntent.getBroadcast(this, 6257, intent, flags);
+            PendingIntent pendingIntent = PendingIntent.getActivity(this, 6257, intent, flags);
             usbManager.requestPermission(device, pendingIntent);
 
-            status("已发起系统 USB 权限请求，请在弹窗中点“允许”。");
+            status("已向系统请求 USB 权限。如果没有弹窗：请拔插摄像头；如果弹出“打开USB2.0 Camera”，也点确定。");
         } catch (Throwable t) {
             opening = false;
             openButtonPostEnabled(true);
