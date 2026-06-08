@@ -2,11 +2,16 @@
 package com.jlxc.uvcai;
 
 import android.app.Activity;
+import android.app.PendingIntent;
+import android.content.BroadcastReceiver;
 import android.content.Context;
+import android.content.Intent;
+import android.content.IntentFilter;
 import android.graphics.Color;
 import android.hardware.usb.UsbDevice;
 import android.hardware.usb.UsbInterface;
 import android.hardware.usb.UsbManager;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.HandlerThread;
@@ -35,11 +40,20 @@ import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 
-// 纯 UVC 直连预览 App：不录屏，不调用第三方 USB Camera App，不走 Camera2。
-// asyncopen 版：点击“打开UVC”后，枚举、selectDevice、openCamera、startPreview 全部尽量丢到后台线程。
-// 目的：避免车机在某一步 USB 调用阻塞时把 UI 主线程卡死。
+/**
+ * UVCAI UVC 直连 - 自管 USB 权限版
+ *
+ * 重点修复：
+ * 部分车机上，UVCAndroid 内部申请 USB 权限会出现“用户点了允许，但回调 onCancel，
+ * UsbManager.hasPermission=false”的情况。
+ *
+ * 这一版不再完全依赖 UVCAndroid 内部权限请求，而是 App 自己先通过
+ * UsbManager.requestPermission() 请求权限；拿到 ACTION_USB_PERMISSION 且 granted=true 后，
+ * 再交给 CameraHelper.selectDevice()。
+ */
 public class MainActivity extends Activity implements View.OnClickListener {
     private static final String TAG = "UVCAI-UVC";
+    private static final String ACTION_USB_PERMISSION = "com.jlxc.uvcai.USB_PERMISSION";
 
     private FrameLayout previewContainer;
     private AspectRatioSurfaceView cameraView;
@@ -51,7 +65,10 @@ public class MainActivity extends Activity implements View.OnClickListener {
     private Button nextSizeButton;
 
     private ICameraHelper cameraHelper;
+    private UsbManager usbManager;
     private UsbDevice currentDevice;
+    private UsbDevice pendingPermissionDevice;
+
     private final List<Size> supportedSizes = new ArrayList<Size>();
     private int selectedSizeIndex = -1;
 
@@ -69,22 +86,60 @@ public class MainActivity extends Activity implements View.OnClickListener {
     private volatile boolean opening = false;
     private long openToken = 0L;
 
+    private final BroadcastReceiver usbPermissionReceiver = new BroadcastReceiver() {
+        @Override
+        public void onReceive(Context context, Intent intent) {
+            if (!ACTION_USB_PERMISSION.equals(intent.getAction())) {
+                return;
+            }
+
+            final UsbDevice device = intent.getParcelableExtra(UsbManager.EXTRA_DEVICE);
+            final boolean granted = intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false);
+
+            if (device == null) {
+                opening = false;
+                openButtonPostEnabled(true);
+                status("USB 权限回调异常：device=null");
+                return;
+            }
+
+            if (!granted) {
+                opening = false;
+                openButtonPostEnabled(true);
+                status("系统 USB 权限被拒绝：" + safeDeviceName(device) + "。如果你明明点了允许，请拔插摄像头后重试。");
+                return;
+            }
+
+            currentDevice = device;
+            status("系统 USB 权限已授权：" + safeDeviceName(device) + "，继续打开 UVC...");
+            selectDeviceAfterSystemPermission(device);
+        }
+    };
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
 
+        usbManager = (UsbManager) getSystemService(Context.USB_SERVICE);
+
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         buildUi();
+        registerUsbPermissionReceiver();
 
         workerThread = new HandlerThread("uvc-worker");
         workerThread.start();
         workerHandler = new Handler(workerThread.getLooper());
 
-        status("已进入 UVC 页面。权限修正版：若系统已授权但库误报取消，会自动继续打开。先点“启动UVC引擎”，再点“打开UVC”。");
+        status("自管权限版。先点“启动UVC引擎”，再点“打开UVC”。如果系统弹窗，请点允许。");
     }
 
     @Override
     protected void onDestroy() {
+        try {
+            unregisterReceiver(usbPermissionReceiver);
+        } catch (Throwable ignored) {
+        }
+
         releaseCameraHelper();
 
         if (workerThread != null) {
@@ -96,13 +151,22 @@ public class MainActivity extends Activity implements View.OnClickListener {
         super.onDestroy();
     }
 
+    private void registerUsbPermissionReceiver() {
+        IntentFilter filter = new IntentFilter(ACTION_USB_PERMISSION);
+        if (Build.VERSION.SDK_INT >= 33) {
+            registerReceiver(usbPermissionReceiver, filter, Context.RECEIVER_NOT_EXPORTED);
+        } else {
+            registerReceiver(usbPermissionReceiver, filter);
+        }
+    }
+
     private void buildUi() {
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
         root.setBackgroundColor(Color.BLACK);
 
         TextView title = new TextView(this);
-        title.setText("UVCAI UVC 直连 - 权限修正版");
+        title.setText("UVCAI UVC 直连 - 自管权限版");
         title.setTextColor(Color.WHITE);
         title.setTextSize(20f);
         title.setGravity(Gravity.CENTER_VERTICAL);
@@ -217,7 +281,7 @@ public class MainActivity extends Activity implements View.OnClickListener {
             return;
         }
 
-        status("正在初始化 UVC 引擎（64位懒加载）...");
+        status("正在初始化 UVC 引擎...");
 
         if (workerHandler == null) {
             status("后台线程未就绪，无法初始化 UVC");
@@ -228,9 +292,6 @@ public class MainActivity extends Activity implements View.OnClickListener {
             @Override
             public void run() {
                 try {
-                    // 关键改动：
-                    // 以前在 Application.onCreate 里 UVCUtils.init，部分 64 位系统会一打开 App 就卡。
-                    // 现在移动到按钮触发，并放后台线程，避免主界面直接冻结。
                     UVCUtils.init(getApplicationContext());
 
                     mainHandler.post(new Runnable() {
@@ -240,7 +301,7 @@ public class MainActivity extends Activity implements View.OnClickListener {
                                 cameraHelper = new CameraHelper();
                                 cameraHelper.setStateCallback(stateCallback);
                                 helperStarted = true;
-                                status("UVC 引擎启动完成。请点“打开UVC”。");
+                                status("UVC 引擎启动完成。现在点“打开UVC”。");
                             } catch (Throwable t) {
                                 status("CameraHelper 创建失败：" + shortError(t));
                                 Log.e(TAG, "CameraHelper create failed", t);
@@ -287,6 +348,7 @@ public class MainActivity extends Activity implements View.OnClickListener {
         helperStarted = false;
         opening = false;
         currentDevice = null;
+        pendingPermissionDevice = null;
         supportedSizes.clear();
         selectedSizeIndex = -1;
     }
@@ -311,76 +373,119 @@ public class MainActivity extends Activity implements View.OnClickListener {
         runUvcJob("openUvcAsync", new Runnable() {
             @Override
             public void run() {
-                final UsbDevice device = findFirstUvcDeviceByCameraHelperFirst();
+                final UsbDevice device = findFirstUvcDeviceBySystemUsbManager();
                 if (device == null) {
                     postOpenFailed(token, "系统 USB 列表里没找到 UVC 摄像头。请确认摄像头已插入、USB Host 正常。");
                     return;
                 }
 
                 currentDevice = device;
-                postStatus("找到 UVC 设备：" + safeDeviceName(device) + "，正在请求权限...");
 
-                try {
-                    // 这一步之前在主线程可能导致 UI 卡死；现在放后台线程。
-                    cameraHelper.selectDevice(device);
-                    // 正常情况下后续会进入 onDeviceOpen 回调。
-                } catch (Throwable t) {
-                    if (hasUsbPermission(device)) {
-                        forceOpenAfterPermission(device, "selectDevice 异常但系统已有 USB 权限");
-                    } else {
-                        postOpenFailed(token, "selectDevice 失败：" + shortError(t));
-                    }
+                if (hasUsbPermission(device)) {
+                    postStatus("系统已拥有 USB 权限，直接打开：" + safeDeviceName(device));
+                    selectDeviceAfterSystemPermission(device);
+                } else {
+                    postStatus("准备请求系统 USB 权限：" + safeDeviceName(device));
+                    mainHandler.post(new Runnable() {
+                        @Override
+                        public void run() {
+                            requestUsbPermission(device);
+                        }
+                    });
                 }
             }
         });
 
-        // 12 秒兜底。即便底层库卡在 worker，主线程也会恢复按钮。
         mainHandler.postDelayed(new Runnable() {
             @Override
             public void run() {
                 if (opening && token == openToken) {
                     opening = false;
                     openButton.setEnabled(true);
-                    status("打开UVC超时：可能卡在权限请求或底层 selectDevice。请拔插摄像头后重试。");
+                    status("打开UVC超时。请拔插摄像头后重试。");
                 }
             }
-        }, 12000);
+        }, 15000);
     }
 
+    private void requestUsbPermission(UsbDevice device) {
+        if (usbManager == null || device == null) {
+            opening = false;
+            openButtonPostEnabled(true);
+            status("无法请求 USB 权限：UsbManager 或 device 为空");
+            return;
+        }
 
-    private UsbDevice findFirstUvcDeviceByCameraHelperFirst() {
-        // 优先使用 UVCAndroid 自己枚举到的 UsbDevice。
-        // 有些库内部 USBMonitor 只认自己枚举的 device；
-        // 直接用系统 UsbManager 的对象可能导致授权后误判 onCancel。
         try {
-            if (cameraHelper != null) {
-                List list = cameraHelper.getDeviceList();
-                if (list != null && !list.isEmpty()) {
-                    for (Object o : list) {
-                        if (o instanceof UsbDevice) {
-                            UsbDevice d = (UsbDevice) o;
-                            if (isUvcDevice(d)) {
-                                return d;
-                            }
-                        }
-                    }
+            pendingPermissionDevice = device;
 
-                    Object first = list.get(0);
-                    if (first instanceof UsbDevice) {
-                        return (UsbDevice) first;
+            int flags = PendingIntent.FLAG_UPDATE_CURRENT;
+            if (Build.VERSION.SDK_INT >= 31) {
+                // Android 12+ 必须 mutable，否则系统可能无法回填 EXTRA_DEVICE / EXTRA_PERMISSION_GRANTED。
+                flags |= PendingIntent.FLAG_MUTABLE;
+            }
+
+            Intent intent = new Intent(ACTION_USB_PERMISSION);
+            intent.setPackage(getPackageName());
+
+            PendingIntent pendingIntent = PendingIntent.getBroadcast(this, 6257, intent, flags);
+            usbManager.requestPermission(device, pendingIntent);
+
+            status("已发起系统 USB 权限请求，请在弹窗中点“允许”。");
+        } catch (Throwable t) {
+            opening = false;
+            openButtonPostEnabled(true);
+            status("请求 USB 权限失败：" + shortError(t));
+            Log.e(TAG, "requestUsbPermission failed", t);
+        }
+    }
+
+    private void selectDeviceAfterSystemPermission(final UsbDevice device) {
+        if (cameraHelper == null || device == null) {
+            postOpenFailed(openToken, "UVC 引擎或设备为空，无法打开");
+            return;
+        }
+
+        runUvcJob("selectDeviceAfterSystemPermission", new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    // 即使系统已经授权，CameraHelper 内部仍需要 selectDevice 来绑定设备。
+                    cameraHelper.selectDevice(device);
+                } catch (Throwable t) {
+                    if (hasUsbPermission(device)) {
+                        forceOpenAfterPermission(device, "selectDevice 异常但系统已有 USB 权限");
+                    } else {
+                        postOpenFailed(openToken, "selectDevice 失败：" + shortError(t));
                     }
                 }
             }
-        } catch (Throwable t) {
-            Log.w(TAG, "cameraHelper.getDeviceList failed, fallback to UsbManager", t);
+        });
+    }
+
+    private void forceOpenAfterPermission(final UsbDevice device, final String reason) {
+        if (cameraHelper == null || device == null) {
+            postOpenFailed(openToken, "权限已授权，但 UVC 引擎或设备为空");
+            return;
         }
 
-        return findFirstUvcDeviceBySystemUsbManager();
+        postStatus(reason + "，尝试直接 openCamera...");
+
+        runUvcJob("forceOpenAfterPermission", new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    cameraHelper.openCamera();
+                } catch (Throwable t) {
+                    postOpenFailed(openToken, "授权后 openCamera 失败：" + shortError(t));
+                }
+            }
+        });
     }
 
     private UsbDevice findFirstUvcDeviceBySystemUsbManager() {
         try {
-            UsbManager manager = (UsbManager) getSystemService(Context.USB_SERVICE);
+            UsbManager manager = usbManager != null ? usbManager : (UsbManager) getSystemService(Context.USB_SERVICE);
             if (manager == null) return null;
 
             HashMap<String, UsbDevice> map = manager.getDeviceList();
@@ -426,6 +531,16 @@ public class MainActivity extends Activity implements View.OnClickListener {
         return false;
     }
 
+    private boolean hasUsbPermission(UsbDevice device) {
+        if (device == null) return false;
+        try {
+            UsbManager manager = usbManager != null ? usbManager : (UsbManager) getSystemService(Context.USB_SERVICE);
+            return manager != null && manager.hasPermission(device);
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
     private void postOpenFailed(final long token, final String msg) {
         mainHandler.post(new Runnable() {
             @Override
@@ -447,7 +562,7 @@ public class MainActivity extends Activity implements View.OnClickListener {
 
         @Override
         public void onDeviceOpen(final UsbDevice device, boolean isFirstOpen) {
-            postStatus("USB 权限已允许，后台打开摄像头...");
+            postStatus("UVC 库设备已打开，后台 openCamera...");
 
             runUvcJob("openCamera", new Runnable() {
                 @Override
@@ -511,15 +626,14 @@ public class MainActivity extends Activity implements View.OnClickListener {
 
         @Override
         public void onCancel(final UsbDevice device) {
-            // 有些车机/系统会出现“用户实际点了允许，但 UVC 库仍回调 onCancel”的情况。
-            // 这里不再直接判定失败，而是先用系统 UsbManager.hasPermission() 二次确认。
+            // UVC 库仍可能误报 cancel。此处以系统 UsbManager 权限为准。
             if (hasUsbPermission(device)) {
-                forceOpenAfterPermission(device, "UVC 库回调权限取消");
+                forceOpenAfterPermission(device, "UVC 库回调权限取消，但系统已有权限");
                 return;
             }
 
             opening = false;
-            postStatus("USB 权限被取消：" + safeDeviceName(device) + "。系统检测 hasPermission=false，请重新插拔后再试。");
+            postStatus("UVC 库回调权限取消，且系统检测 hasPermission=false：" + safeDeviceName(device));
             openButtonPostEnabled(true);
         }
 
@@ -759,44 +873,14 @@ public class MainActivity extends Activity implements View.OnClickListener {
         return 0;
     }
 
-
-    private boolean hasUsbPermission(UsbDevice device) {
-        if (device == null) return false;
-        try {
-            UsbManager manager = (UsbManager) getSystemService(Context.USB_SERVICE);
-            return manager != null && manager.hasPermission(device);
-        } catch (Throwable t) {
-            return false;
-        }
-    }
-
-    private void forceOpenAfterPermission(final UsbDevice device, final String reason) {
-        if (cameraHelper == null || device == null) {
-            postStatus("权限已授权，但 UVC 引擎或设备为空，无法继续打开");
-            opening = false;
-            openButtonPostEnabled(true);
-            return;
-        }
-
-        postStatus(reason + "。检测到系统已有 USB 权限，跳过取消回调并继续打开摄像头...");
-
-        runUvcJob("forceOpenAfterPermission", new Runnable() {
-            @Override
-            public void run() {
-                try {
-                    cameraHelper.openCamera();
-                } catch (Throwable t) {
-                    postOpenFailed(openToken, "授权后 openCamera 仍失败：" + shortError(t));
-                }
-            }
-        });
-    }
-
     private String safeDeviceName(UsbDevice device) {
         if (device == null) return "unknown";
         try {
-            return device.getDeviceName() + " VID:" + device.getVendorId() + " PID:" + device.getProductId()
-                    + " CLS:" + device.getDeviceClass() + " IF:" + device.getInterfaceCount();
+            return device.getDeviceName()
+                    + " VID:" + device.getVendorId()
+                    + " PID:" + device.getProductId()
+                    + " CLS:" + device.getDeviceClass()
+                    + " IF:" + device.getInterfaceCount();
         } catch (Throwable t) {
             return String.valueOf(device);
         }

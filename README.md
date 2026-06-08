@@ -88,3 +88,9 @@ implementation 'com.herohan:UVCAndroid:1.0.12'
 - 确认 `MainActivity.java` 内同时包含方法调用和方法定义：
   - `findFirstUvcDeviceByCameraHelperFirst()`
 - Workflow 增加 `verify-mainactivity-source`，构建前会打印并检查该方法是否存在，避免旧文件/未覆盖文件继续参与编译。
+
+
+## v9 ownpermission
+
+不再依赖 UVCAndroid 内部权限申请流程。App 先使用 `UsbManager.requestPermission()` 自己请求 USB 权限，收到系统授权广播后再交给 `CameraHelper.selectDevice()`。
+这版用于修复：用户实际点击允许，但 App 显示 hasPermission=false / 权限被取消的问题。

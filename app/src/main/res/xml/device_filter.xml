@@ -5,4 +5,5 @@
 
     <!-- 一些复合设备会以 Miscellaneous / IAD 暴露 UVC 接口 -->
     <usb-device class="239" subclass="2" protocol="1" />
+    <usb-device vendor-id="6257" product-id="774" />
 </resources>
