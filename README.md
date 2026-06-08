@@ -49,3 +49,8 @@ implementation 'com.herohan:UVCAndroid:1.0.12'
 ## v2 修复
 
 修复 Kotlin stdlib 依赖冲突：删除 appcompat，强制 Kotlin stdlib 统一为 1.8.22，并排除旧的 kotlin-stdlib-jdk7/jdk8 1.6.21。
+
+
+## v3 safeopen 修复
+
+进入页面后不再自动枚举/打开摄像头，避免部分车机 USB 栈在主线程卡住。流程改为：启动UVC引擎 → 打开UVC。枚举设备放到后台线程，并增加 10 秒超时提示。
