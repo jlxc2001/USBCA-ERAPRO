@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- USB Video Class: CC_VIDEO = 0x0e -->
+    <usb-device class="14" />
+
+    <!-- 一些复合设备会以 Miscellaneous / IAD 暴露 UVC 接口 -->
+    <usb-device class="239" subclass="2" protocol="1" />
+</resources>
