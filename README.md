@@ -1,15 +1,14 @@
-# USBCA-ERAPRO UVC v14
+# USBCA-ERAPRO UVC v16
 
-修复：摄像头已经打开，状态显示 `UVC 预览中：1600x1200@30`，但画面黑屏。
+FrameCallback 诊断版。
 
-原因判断：默认分辨率 1600x1200@30 对你的车机/USB2.0 摄像头带宽或格式协商不稳，能 open 但不出帧。
+v14/v15 已经证明：权限、openCamera、startPreview 都能走到，但 Surface/Texture 都没有实际画面。
 
-v14 改动：
-- 启动预览前优先选择低带宽分辨率：640x480 / 800x600 / 960x540 / 1024x768 / 1280x720
-- 对 SurfaceHolder 调用 `setFixedSize(width, height)`
-- 分辨率按钮切换时也同步更新 Surface fixed size
+v16 不再走 Surface/Texture 预览，而是：
+- IFrameCallback 拿 BGR 帧
+- 统计 frameCount
+- 每 5 帧转 Bitmap 画到 ImageView
 
-测试：
-1. 启动UVC引擎
-2. 打开UVC
-3. 如果还黑屏，连续点“分辨率”，优先试 640x480 / 800x600
+判断：
+- 如果 frame 数增加并出现图像：预览 Surface 链路有问题，后续 AI 直接走回调帧即可。
+- 如果 frame 数不增加：底层没有出帧，需要换 UVC 库或切换 MJPEG/YUYV 格式协商。
