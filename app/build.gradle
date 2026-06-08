@@ -10,8 +10,8 @@ android {
         applicationId "com.jlxc.uvcai"
         minSdk 21
         targetSdk 35
-        versionCode 1
-        versionName "1.0-direct-uvc"
+        versionCode 2
+        versionName "1.0-direct-uvc-kotlinfix"
 
         ndk {
             // 你的车机疑似 32 位，先只出 32 位 APK，避免装错 ABI。
@@ -31,7 +31,20 @@ android {
     }
 }
 
+// 解决 UVCAndroid 依赖链里 Kotlin 1.8.x 与旧 kotlin-stdlib-jdk7/jdk8 1.6.x 重复类冲突。
+// 这个 App 本身是 Java 写的，不需要 appcompat。
+configurations.configureEach {
+    resolutionStrategy {
+        force 'org.jetbrains.kotlin:kotlin-stdlib:1.8.22'
+        force 'org.jetbrains.kotlin:kotlin-stdlib-jdk7:1.8.22'
+        force 'org.jetbrains.kotlin:kotlin-stdlib-jdk8:1.8.22'
+    }
+}
+
 dependencies {
-    implementation 'androidx.appcompat:appcompat:1.6.1'
-    implementation 'com.herohan:UVCAndroid:1.0.12'
+    implementation('com.herohan:UVCAndroid:1.0.12') {
+        exclude group: 'org.jetbrains.kotlin', module: 'kotlin-stdlib-jdk7'
+        exclude group: 'org.jetbrains.kotlin', module: 'kotlin-stdlib-jdk8'
+    }
+    implementation 'org.jetbrains.kotlin:kotlin-stdlib:1.8.22'
 }

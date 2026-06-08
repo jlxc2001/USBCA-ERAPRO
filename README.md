@@ -44,3 +44,8 @@ implementation 'com.herohan:UVCAndroid:1.0.12'
 ```
 
 该库是用于非 root Android 设备访问 UVC 摄像头的开源库。
+
+
+## v2 修复
+
+修复 Kotlin stdlib 依赖冲突：删除 appcompat，强制 Kotlin stdlib 统一为 1.8.22，并排除旧的 kotlin-stdlib-jdk7/jdk8 1.6.21。
