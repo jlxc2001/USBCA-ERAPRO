@@ -54,3 +54,25 @@ implementation 'com.herohan:UVCAndroid:1.0.12'
 ## v3 safeopen 修复
 
 进入页面后不再自动枚举/打开摄像头，避免部分车机 USB 栈在主线程卡住。流程改为：启动UVC引擎 → 打开UVC。枚举设备放到后台线程，并增加 10 秒超时提示。
+
+
+## v4 asyncopen 修复
+
+修复点击“打开UVC”后 UI 卡住：不再调用 UVCAndroid 的 `getDeviceList()` 做枚举，改用系统 `UsbManager.getDeviceList()`；同时把 `selectDevice`、`openCamera`、`startPreview`、`addSurface` 等重操作尽量放到后台线程，主线程只更新 UI。
+
+
+## v5 dualabi-lazyinit 修复
+
+- APK 同时包含 `armeabi-v7a` 和 `arm64-v8a`
+- 移除 `Application.onCreate()` 中的 UVC 初始化
+- `UVCUtils.init()` 改为点击“启动UVC引擎”后后台执行
+- 目标：避免部分 64 位设备刚打开 App 就卡死
+
+
+## v6 permissionfix 修复
+
+修复部分车机上“用户实际允许 USB 权限，但 UVC 库仍回调 onCancel”的问题：
+
+- 打开设备时优先使用 `cameraHelper.getDeviceList()` 的设备对象
+- 若收到 `onCancel`，用 `UsbManager.hasPermission(device)` 二次确认
+- 如果系统实际已经授权，则忽略取消回调并继续 `openCamera()`

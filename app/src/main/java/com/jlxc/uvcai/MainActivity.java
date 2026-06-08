@@ -2,8 +2,11 @@
 package com.jlxc.uvcai;
 
 import android.app.Activity;
+import android.content.Context;
 import android.graphics.Color;
 import android.hardware.usb.UsbDevice;
+import android.hardware.usb.UsbInterface;
+import android.hardware.usb.UsbManager;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.HandlerThread;
@@ -23,15 +26,18 @@ import com.herohan.uvcapp.CameraException;
 import com.herohan.uvcapp.CameraHelper;
 import com.herohan.uvcapp.ICameraHelper;
 import com.serenegiant.usb.Size;
+import com.serenegiant.utils.UVCUtils;
 import com.serenegiant.widget.AspectRatioSurfaceView;
 
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.List;
 
 // 纯 UVC 直连预览 App：不录屏，不调用第三方 USB Camera App，不走 Camera2。
-// safeopen 版：进入页面不自动枚举/打开摄像头，避免部分车机 USB 栈在主线程卡死。
+// asyncopen 版：点击“打开UVC”后，枚举、selectDevice、openCamera、startPreview 全部尽量丢到后台线程。
+// 目的：避免车机在某一步 USB 调用阻塞时把 UI 主线程卡死。
 public class MainActivity extends Activity implements View.OnClickListener {
     private static final String TAG = "UVCAI-UVC";
 
@@ -60,7 +66,8 @@ public class MainActivity extends Activity implements View.OnClickListener {
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
 
     private boolean helperStarted = false;
-    private boolean opening = false;
+    private volatile boolean opening = false;
+    private long openToken = 0L;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -73,7 +80,7 @@ public class MainActivity extends Activity implements View.OnClickListener {
         workerThread.start();
         workerHandler = new Handler(workerThread.getLooper());
 
-        status("已进入 UVC 页面。为避免车机卡死，本版不会自动打开摄像头。先点“启动UVC引擎”，再点“打开UVC”。");
+        status("已进入 UVC 页面。权限修正版：若系统已授权但库误报取消，会自动继续打开。先点“启动UVC引擎”，再点“打开UVC”。");
     }
 
     @Override
@@ -95,7 +102,7 @@ public class MainActivity extends Activity implements View.OnClickListener {
         root.setBackgroundColor(Color.BLACK);
 
         TextView title = new TextView(this);
-        title.setText("UVCAI UVC 直连 - 安全启动版");
+        title.setText("UVCAI UVC 直连 - 权限修正版");
         title.setTextColor(Color.WHITE);
         title.setTextSize(20f);
         title.setGravity(Gravity.CENTER_VERTICAL);
@@ -123,7 +130,7 @@ public class MainActivity extends Activity implements View.OnClickListener {
         statusText.setTextSize(14f);
         statusText.setPadding(dp(10), dp(8), dp(10), dp(8));
         statusText.setText("等待启动");
-        statusText.setBackgroundColor(Color.argb(140, 0, 0, 0));
+        statusText.setBackgroundColor(Color.argb(150, 0, 0, 0));
 
         FrameLayout.LayoutParams statusLp = new FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT,
@@ -193,10 +200,14 @@ public class MainActivity extends Activity implements View.OnClickListener {
         @Override
         public void surfaceDestroyed(SurfaceHolder holder) {
             surfaceReady = false;
-            if (cameraHelper != null && currentSurface != null) {
-                safeRemoveSurface(currentSurface);
-            }
+            final Surface s = currentSurface;
             currentSurface = null;
+            runUvcJob("removeSurface", new Runnable() {
+                @Override
+                public void run() {
+                    safeRemoveSurface(s);
+                }
+            });
         }
     };
 
@@ -206,36 +217,68 @@ public class MainActivity extends Activity implements View.OnClickListener {
             return;
         }
 
-        status("正在启动 UVC 引擎... 如果这里卡住，说明当前库初始化不兼容该车机系统。");
+        status("正在初始化 UVC 引擎（64位懒加载）...");
 
-        // 放主线程延后执行，避免刚进入 Activity 时和 Surface 创建抢资源。
-        mainHandler.postDelayed(new Runnable() {
+        if (workerHandler == null) {
+            status("后台线程未就绪，无法初始化 UVC");
+            return;
+        }
+
+        workerHandler.post(new Runnable() {
             @Override
             public void run() {
                 try {
-                    cameraHelper = new CameraHelper();
-                    cameraHelper.setStateCallback(stateCallback);
-                    helperStarted = true;
-                    status("UVC 引擎启动完成。请插入摄像头后点“打开UVC”。");
+                    // 关键改动：
+                    // 以前在 Application.onCreate 里 UVCUtils.init，部分 64 位系统会一打开 App 就卡。
+                    // 现在移动到按钮触发，并放后台线程，避免主界面直接冻结。
+                    UVCUtils.init(getApplicationContext());
+
+                    mainHandler.post(new Runnable() {
+                        @Override
+                        public void run() {
+                            try {
+                                cameraHelper = new CameraHelper();
+                                cameraHelper.setStateCallback(stateCallback);
+                                helperStarted = true;
+                                status("UVC 引擎启动完成。请点“打开UVC”。");
+                            } catch (Throwable t) {
+                                status("CameraHelper 创建失败：" + shortError(t));
+                                Log.e(TAG, "CameraHelper create failed", t);
+                            }
+                        }
+                    });
                 } catch (Throwable t) {
-                    status("UVC 引擎启动失败：" + t.getClass().getSimpleName() + " / " + t.getMessage());
-                    Log.e(TAG, "startUvcEngineSafe failed", t);
+                    postStatus("UVC 初始化失败：" + shortError(t));
+                    Log.e(TAG, "UVCUtils.init failed", t);
                 }
             }
-        }, 300);
+        });
     }
 
     private void releaseCameraHelper() {
         try {
             if (cameraHelper != null) {
-                if (currentSurface != null) {
-                    safeRemoveSurface(currentSurface);
-                }
-                try {
-                    cameraHelper.closeCamera();
-                } catch (Throwable ignored) {
-                }
-                cameraHelper.release();
+                final ICameraHelper helper = cameraHelper;
+                final Surface surface = currentSurface;
+                runUvcJob("release", new Runnable() {
+                    @Override
+                    public void run() {
+                        try {
+                            if (surface != null) {
+                                helper.removeSurface(surface);
+                            }
+                        } catch (Throwable ignored) {
+                        }
+                        try {
+                            helper.closeCamera();
+                        } catch (Throwable ignored) {
+                        }
+                        try {
+                            helper.release();
+                        } catch (Throwable ignored) {
+                        }
+                    }
+                });
             }
         } catch (Throwable ignored) {
         }
@@ -248,171 +291,240 @@ public class MainActivity extends Activity implements View.OnClickListener {
         selectedSizeIndex = -1;
     }
 
-    private void autoOpenFirstDeviceSafe() {
+    private void openUvcAsync() {
         if (!helperStarted || cameraHelper == null) {
             status("请先点“启动UVC引擎”。");
             return;
         }
 
         if (opening) {
-            status("正在打开中，请稍等...");
+            status("正在打开中。如果长时间无反应，点“关闭”后拔插摄像头再试。");
             return;
         }
 
         opening = true;
-        status("正在后台枚举 USB 摄像头...");
+        final long token = ++openToken;
+        openButton.setEnabled(false);
 
-        if (workerHandler == null) {
-            status("后台线程未就绪");
-            opening = false;
-            return;
-        }
+        status("正在枚举 USB 设备...");
 
-        workerHandler.post(new Runnable() {
+        runUvcJob("openUvcAsync", new Runnable() {
             @Override
             public void run() {
-                UsbDevice found = null;
-                String error = null;
-
-                try {
-                    List list = cameraHelper.getDeviceList();
-                    if (list != null && !list.isEmpty()) {
-                        found = (UsbDevice) list.get(0);
-                    }
-                } catch (Throwable t) {
-                    error = t.getClass().getSimpleName() + " / " + t.getMessage();
-                    Log.e(TAG, "getDeviceList failed", t);
+                final UsbDevice device = findFirstUvcDeviceByCameraHelperFirst();
+                if (device == null) {
+                    postOpenFailed(token, "系统 USB 列表里没找到 UVC 摄像头。请确认摄像头已插入、USB Host 正常。");
+                    return;
                 }
 
-                final UsbDevice resultDevice = found;
-                final String resultError = error;
+                currentDevice = device;
+                postStatus("找到 UVC 设备：" + safeDeviceName(device) + "，正在请求权限...");
 
-                mainHandler.post(new Runnable() {
-                    @Override
-                    public void run() {
-                        if (resultDevice == null) {
-                            opening = false;
-                            if (resultError != null) {
-                                status("枚举 USB 摄像头失败：" + resultError);
-                            } else {
-                                status("未检测到 UVC 摄像头。请确认已插入、车机 USB Host 正常、并且系统弹过 USB 权限。");
-                            }
-                            return;
-                        }
-
-                        selectDeviceSafe(resultDevice);
+                try {
+                    // 这一步之前在主线程可能导致 UI 卡死；现在放后台线程。
+                    cameraHelper.selectDevice(device);
+                    // 正常情况下后续会进入 onDeviceOpen 回调。
+                } catch (Throwable t) {
+                    if (hasUsbPermission(device)) {
+                        forceOpenAfterPermission(device, "selectDevice 异常但系统已有 USB 权限");
+                    } else {
+                        postOpenFailed(token, "selectDevice 失败：" + shortError(t));
                     }
-                });
+                }
             }
         });
 
-        // 10 秒兜底，避免一直显示“打开中”
+        // 12 秒兜底。即便底层库卡在 worker，主线程也会恢复按钮。
         mainHandler.postDelayed(new Runnable() {
             @Override
             public void run() {
-                if (opening) {
+                if (opening && token == openToken) {
                     opening = false;
-                    status("打开超时。请拔插摄像头后重试，或点“关闭”再点“启动UVC引擎”。");
+                    openButton.setEnabled(true);
+                    status("打开UVC超时：可能卡在权限请求或底层 selectDevice。请拔插摄像头后重试。");
                 }
             }
-        }, 10000);
+        }, 12000);
     }
 
-    private void selectDeviceSafe(UsbDevice device) {
-        currentDevice = device;
-        status("选择设备：" + safeDeviceName(device) + "，等待 USB 权限弹窗...");
+    private UsbDevice findFirstUvcDeviceBySystemUsbManager() {
+        try {
+            UsbManager manager = (UsbManager) getSystemService(Context.USB_SERVICE);
+            if (manager == null) return null;
+
+            HashMap<String, UsbDevice> map = manager.getDeviceList();
+            if (map == null || map.isEmpty()) return null;
+
+            UsbDevice fallback = null;
+
+            for (UsbDevice device : map.values()) {
+                if (device == null) continue;
+
+                if (isUvcDevice(device)) {
+                    return device;
+                }
+
+                // 有些摄像头是复合设备，device class 不是 14，但接口里有视频类。
+                if (fallback == null) {
+                    fallback = device;
+                }
+            }
+
+            return fallback;
+        } catch (Throwable t) {
+            Log.e(TAG, "findFirstUvcDeviceBySystemUsbManager failed", t);
+            return null;
+        }
+    }
+
+    private boolean isUvcDevice(UsbDevice device) {
+        if (device == null) return false;
 
         try {
-            cameraHelper.selectDevice(device);
-        } catch (Throwable t) {
-            opening = false;
-            status("selectDevice 失败：" + t.getClass().getSimpleName() + " / " + t.getMessage());
-            Log.e(TAG, "selectDevice failed", t);
+            if (device.getDeviceClass() == 14) return true;
+
+            for (int i = 0; i < device.getInterfaceCount(); i++) {
+                UsbInterface intf = device.getInterface(i);
+                if (intf != null && intf.getInterfaceClass() == 14) {
+                    return true;
+                }
+            }
+        } catch (Throwable ignored) {
         }
+
+        return false;
+    }
+
+    private void postOpenFailed(final long token, final String msg) {
+        mainHandler.post(new Runnable() {
+            @Override
+            public void run() {
+                if (token == openToken) {
+                    opening = false;
+                    openButton.setEnabled(true);
+                    status(msg);
+                }
+            }
+        });
     }
 
     private final ICameraHelper.StateCallback stateCallback = new ICameraHelper.StateCallback() {
         @Override
         public void onAttach(UsbDevice device) {
-            status("检测到 UVC 设备：" + safeDeviceName(device) + "。请点“打开UVC”。");
+            status("检测到 USB 设备：" + safeDeviceName(device) + "。请点“打开UVC”。");
         }
 
         @Override
-        public void onDeviceOpen(UsbDevice device, boolean isFirstOpen) {
-            status("USB 权限已允许，正在打开摄像头...");
-            try {
-                cameraHelper.openCamera();
-            } catch (Throwable t) {
-                opening = false;
-                status("openCamera 失败：" + t.getClass().getSimpleName() + " / " + t.getMessage());
-                Log.e(TAG, "openCamera failed", t);
-            }
+        public void onDeviceOpen(final UsbDevice device, boolean isFirstOpen) {
+            postStatus("USB 权限已允许，后台打开摄像头...");
+
+            runUvcJob("openCamera", new Runnable() {
+                @Override
+                public void run() {
+                    try {
+                        cameraHelper.openCamera();
+                    } catch (Throwable t) {
+                        postOpenFailed(openToken, "openCamera 失败：" + shortError(t));
+                    }
+                }
+            });
         }
 
         @Override
-        public void onCameraOpen(UsbDevice device) {
-            status("摄像头已打开，启动预览...");
-            try {
-                cameraHelper.startPreview();
-                updateSupportedSizes();
-                updatePreviewSizeInfo();
-                addPreviewSurfaceIfReady();
-                opening = false;
-            } catch (Throwable t) {
-                opening = false;
-                status("启动预览失败：" + t.getClass().getSimpleName() + " / " + t.getMessage());
-                Log.e(TAG, "startPreview failed", t);
-            }
+        public void onCameraOpen(final UsbDevice device) {
+            postStatus("摄像头已打开，后台启动预览...");
+
+            runUvcJob("startPreview", new Runnable() {
+                @Override
+                public void run() {
+                    try {
+                        cameraHelper.startPreview();
+                        updateSupportedSizes();
+                        updatePreviewSizeInfoOnMain();
+                        addPreviewSurfaceIfReady();
+                        mainHandler.post(new Runnable() {
+                            @Override
+                            public void run() {
+                                opening = false;
+                                openButton.setEnabled(true);
+                                status("UVC 预览中：" + previewSizeText() + " / " + rotationText());
+                            }
+                        });
+                    } catch (Throwable t) {
+                        postOpenFailed(openToken, "startPreview 失败：" + shortError(t));
+                    }
+                }
+            });
         }
 
         @Override
         public void onCameraClose(UsbDevice device) {
             opening = false;
-            status("摄像头已关闭");
-            if (currentSurface != null) {
-                safeRemoveSurface(currentSurface);
-            }
+            postStatus("摄像头已关闭");
+            openButtonPostEnabled(true);
         }
 
         @Override
         public void onDeviceClose(UsbDevice device) {
             opening = false;
-            status("USB 设备已关闭");
+            postStatus("USB 设备已关闭");
+            openButtonPostEnabled(true);
         }
 
         @Override
         public void onDetach(UsbDevice device) {
             opening = false;
-            status("UVC 摄像头已拔出：" + safeDeviceName(device));
+            postStatus("USB 摄像头已拔出：" + safeDeviceName(device));
+            openButtonPostEnabled(true);
         }
 
         @Override
-        public void onCancel(UsbDevice device) {
+        public void onCancel(final UsbDevice device) {
+            // 有些车机/系统会出现“用户实际点了允许，但 UVC 库仍回调 onCancel”的情况。
+            // 这里不再直接判定失败，而是先用系统 UsbManager.hasPermission() 二次确认。
+            if (hasUsbPermission(device)) {
+                forceOpenAfterPermission(device, "UVC 库回调权限取消");
+                return;
+            }
+
             opening = false;
-            status("USB 权限被取消：" + safeDeviceName(device));
+            postStatus("USB 权限被取消：" + safeDeviceName(device) + "。系统检测 hasPermission=false，请重新插拔后再试。");
+            openButtonPostEnabled(true);
         }
 
         @Override
         public void onError(UsbDevice device, CameraException e) {
             opening = false;
             String msg = e != null ? e.getMessage() : "unknown";
-            status("UVC 错误：" + msg);
+            postStatus("UVC 错误：" + msg);
+            openButtonPostEnabled(true);
         }
     };
 
     private void addPreviewSurfaceIfReady() {
-        if (cameraHelper == null || currentSurface == null || !surfaceReady) return;
+        final Surface s = currentSurface;
+        if (cameraHelper == null || s == null || !surfaceReady) return;
 
-        try {
-            if (cameraHelper.isCameraOpened()) {
-                cameraHelper.addSurface(currentSurface, false);
-                applyRotationAndScale();
-                status("UVC 预览中：" + previewSizeText() + " / " + rotationText());
+        runUvcJob("addSurface", new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    if (cameraHelper != null && cameraHelper.isCameraOpened()) {
+                        cameraHelper.addSurface(s, false);
+                        mainHandler.post(new Runnable() {
+                            @Override
+                            public void run() {
+                                applyRotationAndScale();
+                                status("UVC 预览中：" + previewSizeText() + " / " + rotationText());
+                            }
+                        });
+                    }
+                } catch (Throwable t) {
+                    postStatus("添加预览 Surface 失败：" + shortError(t));
+                    Log.e(TAG, "addSurface failed", t);
+                }
             }
-        } catch (Throwable t) {
-            status("添加预览 Surface 失败：" + t.getClass().getSimpleName() + " / " + t.getMessage());
-            Log.e(TAG, "addSurface failed", t);
-        }
+        });
     }
 
     private void safeRemoveSurface(Surface surface) {
@@ -452,8 +564,8 @@ public class MainActivity extends Activity implements View.OnClickListener {
             Size current = cameraHelper.getPreviewSize();
             if (current != null) {
                 for (int i = 0; i < supportedSizes.size(); i++) {
-                    Size s = supportedSizes.get(i);
-                    if (s.width == current.width && s.height == current.height && s.type == current.type) {
+                    Size size = supportedSizes.get(i);
+                    if (size.width == current.width && size.height == current.height && size.type == current.type) {
                         selectedSizeIndex = i;
                         break;
                     }
@@ -464,17 +576,20 @@ public class MainActivity extends Activity implements View.OnClickListener {
         }
     }
 
-    private void updatePreviewSizeInfo() {
-        if (cameraHelper == null) return;
-
-        try {
-            Size size = cameraHelper.getPreviewSize();
-            if (size != null) {
-                cameraView.setAspectRatio(size.width, size.height);
-                applyRotationAndScale();
+    private void updatePreviewSizeInfoOnMain() {
+        mainHandler.post(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    Size size = cameraHelper != null ? cameraHelper.getPreviewSize() : null;
+                    if (size != null) {
+                        cameraView.setAspectRatio(size.width, size.height);
+                        applyRotationAndScale();
+                    }
+                } catch (Throwable ignored) {
+                }
             }
-        } catch (Throwable ignored) {
-        }
+        });
     }
 
     private String previewSizeText() {
@@ -507,20 +622,32 @@ public class MainActivity extends Activity implements View.OnClickListener {
         selectedSizeIndex = (selectedSizeIndex + 1) % supportedSizes.size();
         final Size target = supportedSizes.get(selectedSizeIndex);
 
-        status("切换分辨率：" + target.width + "x" + target.height + "，如果黑屏请再点一次");
+        status("后台切换分辨率：" + target.width + "x" + target.height);
 
-        try {
-            if (currentSurface != null) {
-                safeRemoveSurface(currentSurface);
+        runUvcJob("switchSize", new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    final Surface s = currentSurface;
+                    if (s != null) {
+                        safeRemoveSurface(s);
+                    }
+                    cameraHelper.stopPreview();
+                    cameraHelper.setPreviewSize(target);
+                    cameraHelper.startPreview();
+                    mainHandler.post(new Runnable() {
+                        @Override
+                        public void run() {
+                            cameraView.setAspectRatio(target.width, target.height);
+                            applyRotationAndScale();
+                        }
+                    });
+                    addPreviewSurfaceIfReady();
+                } catch (Throwable t) {
+                    postStatus("切换分辨率失败：" + shortError(t));
+                }
             }
-            cameraHelper.stopPreview();
-            cameraHelper.setPreviewSize(target);
-            cameraHelper.startPreview();
-            cameraView.setAspectRatio(target.width, target.height);
-            addPreviewSurfaceIfReady();
-        } catch (Throwable t) {
-            status("切换分辨率失败：" + t.getClass().getSimpleName() + " / " + t.getMessage());
-        }
+        });
     }
 
     private void cycleRotationMode() {
@@ -601,13 +728,54 @@ public class MainActivity extends Activity implements View.OnClickListener {
         return 0;
     }
 
+
+    private boolean hasUsbPermission(UsbDevice device) {
+        if (device == null) return false;
+        try {
+            UsbManager manager = (UsbManager) getSystemService(Context.USB_SERVICE);
+            return manager != null && manager.hasPermission(device);
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
+    private void forceOpenAfterPermission(final UsbDevice device, final String reason) {
+        if (cameraHelper == null || device == null) {
+            postStatus("权限已授权，但 UVC 引擎或设备为空，无法继续打开");
+            opening = false;
+            openButtonPostEnabled(true);
+            return;
+        }
+
+        postStatus(reason + "。检测到系统已有 USB 权限，跳过取消回调并继续打开摄像头...");
+
+        runUvcJob("forceOpenAfterPermission", new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    cameraHelper.openCamera();
+                } catch (Throwable t) {
+                    postOpenFailed(openToken, "授权后 openCamera 仍失败：" + shortError(t));
+                }
+            }
+        });
+    }
+
     private String safeDeviceName(UsbDevice device) {
         if (device == null) return "unknown";
         try {
-            return device.getDeviceName() + " VID:" + device.getVendorId() + " PID:" + device.getProductId();
+            return device.getDeviceName() + " VID:" + device.getVendorId() + " PID:" + device.getProductId()
+                    + " CLS:" + device.getDeviceClass() + " IF:" + device.getInterfaceCount();
         } catch (Throwable t) {
             return String.valueOf(device);
         }
+    }
+
+    private String shortError(Throwable t) {
+        if (t == null) return "unknown";
+        String msg = t.getMessage();
+        if (msg == null || msg.length() == 0) msg = t.toString();
+        return t.getClass().getSimpleName() + " / " + msg;
     }
 
     private void status(final String s) {
@@ -624,21 +792,57 @@ public class MainActivity extends Activity implements View.OnClickListener {
         }
     }
 
+    private void postStatus(final String s) {
+        mainHandler.post(new Runnable() {
+            @Override
+            public void run() {
+                status(s);
+            }
+        });
+    }
+
+    private void openButtonPostEnabled(final boolean enabled) {
+        mainHandler.post(new Runnable() {
+            @Override
+            public void run() {
+                if (openButton != null) openButton.setEnabled(enabled);
+            }
+        });
+    }
+
+    private void runUvcJob(String name, Runnable r) {
+        if (workerHandler == null) {
+            status("后台线程未就绪：" + name);
+            return;
+        }
+
+        workerHandler.post(r);
+    }
+
     @Override
     public void onClick(View v) {
         if (v == initButton) {
             startUvcEngineSafe();
         } else if (v == openButton) {
-            autoOpenFirstDeviceSafe();
+            openUvcAsync();
         } else if (v == closeButton) {
             opening = false;
+            openToken++;
+            openButton.setEnabled(true);
             if (cameraHelper != null) {
-                try {
-                    cameraHelper.closeCamera();
-                    status("已请求关闭摄像头");
-                } catch (Throwable t) {
-                    status("关闭失败：" + t.getClass().getSimpleName() + " / " + t.getMessage());
-                }
+                runUvcJob("closeCamera", new Runnable() {
+                    @Override
+                    public void run() {
+                        try {
+                            final Surface s = currentSurface;
+                            if (s != null) safeRemoveSurface(s);
+                            cameraHelper.closeCamera();
+                            postStatus("已请求关闭摄像头");
+                        } catch (Throwable t) {
+                            postStatus("关闭失败：" + shortError(t));
+                        }
+                    }
+                });
             } else {
                 status("UVC 引擎未启动");
             }

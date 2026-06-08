@@ -10,12 +10,12 @@ android {
         applicationId "com.jlxc.uvcai"
         minSdk 21
         targetSdk 35
-        versionCode 2
-        versionName "1.0-direct-uvc-kotlinfix"
+        versionCode 4
+        versionName "1.0-direct-uvc-permissionfix"
 
         ndk {
             // 你的车机疑似 32 位，先只出 32 位 APK，避免装错 ABI。
-            abiFilters "armeabi-v7a"
+            abiFilters "armeabi-v7a", "arm64-v8a"
         }
     }
 
