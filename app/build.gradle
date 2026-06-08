@@ -20,8 +20,8 @@ android {
         applicationId "com.jlxc.usbcaerapro"
         minSdk 21
         targetSdk 28
-        versionCode 16
-        versionName "uvc-v16-framecallback"
+        versionCode 17
+        versionName "uvc-v17-framecallback-dummysurface"
 
         ndk {
             // 你的车机疑似 32 位，先只出 32 位 APK，避免装错 ABI。

@@ -1,14 +1,15 @@
-# USBCA-ERAPRO UVC v16
+# USBCA-ERAPRO UVC v17
 
-FrameCallback 诊断版。
+v16 显示 `无帧 / lastAge=-1ms`，说明只有 FrameCallback 不足以启动底层取流。
 
-v14/v15 已经证明：权限、openCamera、startPreview 都能走到，但 Surface/Texture 都没有实际画面。
+v17 增加一个不显示到屏幕的伪 Surface：
 
-v16 不再走 Surface/Texture 预览，而是：
-- IFrameCallback 拿 BGR 帧
-- 统计 frameCount
-- 每 5 帧转 Bitmap 画到 ImageView
+- 创建 SurfaceTexture
+- setDefaultBufferSize(width, height)
+- addSurface(dummySurface, false)
+- 同时启用 IFrameCallback
+- startPreview
 
 判断：
-- 如果 frame 数增加并出现图像：预览 Surface 链路有问题，后续 AI 直接走回调帧即可。
-- 如果 frame 数不增加：底层没有出帧，需要换 UVC 库或切换 MJPEG/YUYV 格式协商。
+- 如果 v17 frame 数开始增加：说明库需要 Surface 才会真正出帧。
+- 如果仍然无帧：当前 UVCAndroid/libuvc 组合和这颗摄像头的格式协商不兼容，下一步应换库/接 AndroidUSBCamera/libausbc。

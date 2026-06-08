@@ -9,6 +9,7 @@ import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.graphics.Bitmap;
 import android.graphics.Color;
+import android.graphics.SurfaceTexture;
 import android.hardware.usb.UsbDevice;
 import android.hardware.usb.UsbInterface;
 import android.hardware.usb.UsbManager;
@@ -19,6 +20,7 @@ import android.os.HandlerThread;
 import android.os.Looper;
 import android.util.Log;
 import android.view.Gravity;
+import android.view.Surface;
 import android.view.View;
 import android.view.WindowManager;
 import android.widget.Button;
@@ -41,7 +43,7 @@ import java.util.HashMap;
 import java.util.List;
 
 /**
- * USBCA-ERAPRO UVC v16 - FrameCallback诊断版
+ * USBCA-ERAPRO UVC v17 - 回调+伪Surface版
  *
  * v14/v15 权限、openCamera、startPreview 已经走通，但 SurfaceView/TextureView 都黑屏。
  * v16 不再靠 Surface/Texture 显示，改成 IFrameCallback 取帧：
@@ -89,6 +91,12 @@ public class MainActivity extends Activity implements View.OnClickListener {
     private int[] argbBuffer;
     private byte[] frameBytes;
 
+    // 有些 UVC 库只有在 addSurface() 之后才真正启动取流；
+    // v16 只有 FrameCallback 没有 Surface，可能导致 startPreview 成功但不出帧。
+    private SurfaceTexture dummySurfaceTexture;
+    private Surface dummySurface;
+    private boolean dummySurfaceAdded = false;
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -105,7 +113,7 @@ public class MainActivity extends Activity implements View.OnClickListener {
         handleUsbPermissionIntent(getIntent());
         handleUsbAttachIntent(getIntent());
 
-        status("v16 帧回调诊断版。先点“启动UVC引擎”。如果首次弹相机权限，必须允许。");
+        status("v17 回调+伪Surface版。先点“启动UVC引擎”。如果首次弹相机权限，必须允许。");
     }
 
     @Override
@@ -174,7 +182,7 @@ public class MainActivity extends Activity implements View.OnClickListener {
         root.setBackgroundColor(Color.BLACK);
 
         TextView title = new TextView(this);
-        title.setText("USBCA-ERAPRO UVC v16 - FrameCallback诊断版");
+        title.setText("USBCA-ERAPRO UVC v17 - 回调+伪Surface版");
         title.setTextColor(Color.WHITE);
         title.setTextSize(20f);
         title.setGravity(Gravity.CENTER_VERTICAL);
@@ -483,6 +491,7 @@ public class MainActivity extends Activity implements View.OnClickListener {
                         if (safeSize != null) {
                             cameraHelper.setPreviewSize(safeSize);
                             postStatus("已选择回调分辨率：" + safeSize.width + "x" + safeSize.height);
+                            prepareDummySurface(safeSize);
                         }
 
                         resetFrameCounter();
@@ -552,6 +561,60 @@ public class MainActivity extends Activity implements View.OnClickListener {
             openButtonPostEnabled(true);
         }
     };
+
+
+    private void prepareDummySurface(Size size) {
+        releaseDummySurface();
+
+        if (size == null) {
+            return;
+        }
+
+        try {
+            // 使用一个不显示到屏幕的 SurfaceTexture，专门喂给 UVC native 预览线程。
+            dummySurfaceTexture = new SurfaceTexture(10);
+            dummySurfaceTexture.setDefaultBufferSize(size.width, size.height);
+            dummySurface = new Surface(dummySurfaceTexture);
+
+            if (cameraHelper != null) {
+                cameraHelper.addSurface(dummySurface, false);
+                dummySurfaceAdded = true;
+                postStatus("伪Surface已加入：" + size.width + "x" + size.height + "，继续启动FrameCallback");
+            }
+        } catch (Throwable t) {
+            dummySurfaceAdded = false;
+            postStatus("伪Surface创建/加入失败：" + shortError(t));
+            Log.e(TAG, "prepareDummySurface failed", t);
+        }
+    }
+
+    private void releaseDummySurface() {
+        try {
+            if (cameraHelper != null && dummySurface != null && dummySurfaceAdded) {
+                cameraHelper.removeSurface(dummySurface);
+            }
+        } catch (Throwable ignored) {
+        }
+
+        dummySurfaceAdded = false;
+
+        try {
+            if (dummySurface != null) {
+                dummySurface.release();
+            }
+        } catch (Throwable ignored) {
+        }
+
+        try {
+            if (dummySurfaceTexture != null) {
+                dummySurfaceTexture.release();
+            }
+        } catch (Throwable ignored) {
+        }
+
+        dummySurface = null;
+        dummySurfaceTexture = null;
+    }
 
     private void resetFrameCounter() {
         frameCount = 0;
@@ -759,6 +822,7 @@ public class MainActivity extends Activity implements View.OnClickListener {
 
                     resetFrameCounter();
                     cameraHelper.setPreviewSize(target);
+                    prepareDummySurface(target);
                     cameraHelper.setFrameCallback(new IFrameCallback() {
                         @Override
                         public void onFrame(ByteBuffer frame) {
@@ -855,6 +919,10 @@ public class MainActivity extends Activity implements View.OnClickListener {
                     public void run() {
                         try {
                             helper.setFrameCallback(null, UVCCamera.PIXEL_FORMAT_BGR);
+                        } catch (Throwable ignored) {
+                        }
+                        try {
+                            releaseDummySurface();
                         } catch (Throwable ignored) {
                         }
                         try {
@@ -973,6 +1041,10 @@ public class MainActivity extends Activity implements View.OnClickListener {
                     public void run() {
                         try {
                             cameraHelper.setFrameCallback(null, UVCCamera.PIXEL_FORMAT_BGR);
+                        } catch (Throwable ignored) {
+                        }
+                        try {
+                            releaseDummySurface();
                         } catch (Throwable ignored) {
                         }
                         try {
