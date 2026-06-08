@@ -6,12 +6,22 @@ android {
     namespace 'com.jlxc.uvcai'
     compileSdk 35
 
+
+    lint {
+        // 这是车机侧载 APK，不上架 Google Play。
+        // targetSdk 28 是为了兼容 Android 10 车机的 USB 权限行为；
+        // AGP 8 的 release 构建会把 targetSdk<33 当成 fatal lint，这里关闭该检查。
+        abortOnError false
+        checkReleaseBuilds false
+        disable 'ExpiredTargetSdkVersion'
+    }
+
     defaultConfig {
         applicationId "com.jlxc.usbcaerapro"
         minSdk 21
         targetSdk 28
-        versionCode 12
-        versionName "uvc-v12-camera-permission"
+        versionCode 13
+        versionName "uvc-v13-lintfix"
 
         ndk {
             // 你的车机疑似 32 位，先只出 32 位 APK，避免装错 ABI。

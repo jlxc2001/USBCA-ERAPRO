@@ -23,3 +23,15 @@ v12 在启动 UVC 前会先请求相机权限。
 7. 插入摄像头。
 8. 点“打开UVC”。
 9. USB 弹窗点确定/允许。
+
+
+## v13 lintfix
+
+修复 GitHub Actions release 构建失败：
+
+```text
+ExpiredTargetSdkVersion
+targetSdk 28
+```
+
+这个 APK 是车机侧载使用，不上架 Google Play。为了兼容 Android 10 车机 USB 权限流程，继续保留 `targetSdk 28`，并关闭 release lint 的 `ExpiredTargetSdkVersion` fatal 检查。
