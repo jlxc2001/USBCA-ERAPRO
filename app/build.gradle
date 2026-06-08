@@ -7,11 +7,11 @@ android {
     compileSdk 35
 
     defaultConfig {
-        applicationId "com.jlxc.uvcai"
+        applicationId "com.jlxc.usbcaerapro"
         minSdk 21
-        targetSdk 35
-        versionCode 9
-        versionName "1.0-direct-uvc-ownpermission"
+        targetSdk 28
+        versionCode 11
+        versionName "uvc-v11-new-package"
 
         ndk {
             // 你的车机疑似 32 位，先只出 32 位 APK，避免装错 ABI。
