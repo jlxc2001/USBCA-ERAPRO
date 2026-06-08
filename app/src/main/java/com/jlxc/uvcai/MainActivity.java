@@ -131,7 +131,7 @@ public class MainActivity extends Activity implements View.OnClickListener {
         workerThread.start();
         workerHandler = new Handler(workerThread.getLooper());
 
-        status("v12 相机权限版。重点：必须先允许相机权限，否则系统会拒绝 UVC 设备 USB 授权。先点“启动UVC引擎”。");
+        status("v14 低分辨率预览版。重点：已默认避开 1600x1200 高带宽预览，优先 640x480/800x600。先点“启动UVC引擎”。");
 
         // 如果 USB 权限结果通过 PendingIntent.getActivity() 回到当前 Activity，这里处理一次。
         handleUsbPermissionIntent(getIntent());
@@ -217,7 +217,7 @@ public class MainActivity extends Activity implements View.OnClickListener {
         root.setBackgroundColor(Color.BLACK);
 
         TextView title = new TextView(this);
-        title.setText("USBCA-ERAPRO UVC v12 - 相机权限版");
+        title.setText("USBCA-ERAPRO UVC v14 - 低分辨率预览版");
         title.setTextColor(Color.WHITE);
         title.setTextSize(20f);
         title.setGravity(Gravity.CENTER_VERTICAL);
@@ -686,18 +686,31 @@ public class MainActivity extends Activity implements View.OnClickListener {
                 @Override
                 public void run() {
                     try {
+                        final Size safeSize = chooseSafePreviewSize();
+                        if (safeSize != null) {
+                            cameraHelper.setPreviewSize(safeSize);
+                            mainHandler.post(new Runnable() {
+                                @Override
+                                public void run() {
+                                    applyPreviewSizeToSurface(safeSize);
+                                    status("已选择低带宽预览分辨率：" + safeSize.width + "x" + safeSize.height + "，正在启动预览...");
+                                }
+                            });
+                        }
+
                         cameraHelper.startPreview();
                         updateSupportedSizes();
                         updatePreviewSizeInfoOnMain();
                         addPreviewSurfaceIfReady();
-                        mainHandler.post(new Runnable() {
+
+                        mainHandler.postDelayed(new Runnable() {
                             @Override
                             public void run() {
                                 opening = false;
                                 openButton.setEnabled(true);
-                                status("UVC 预览中：" + previewSizeText() + " / " + rotationText());
+                                status("UVC 预览中：" + previewSizeText() + " / " + rotationText() + "。如果仍黑屏，点“分辨率”切换到更低分辨率。");
                             }
-                        });
+                        }, 300);
                     } catch (Throwable t) {
                         postOpenFailed(openToken, "startPreview 失败：" + shortError(t));
                     }
@@ -780,6 +793,75 @@ public class MainActivity extends Activity implements View.OnClickListener {
                 cameraHelper.removeSurface(surface);
             }
         } catch (Throwable ignored) {
+        }
+    }
+
+
+    private Size chooseSafePreviewSize() {
+        updateSupportedSizes();
+
+        if (supportedSizes.isEmpty()) {
+            return null;
+        }
+
+        // 车机和 USB2.0 摄像头优先用低带宽分辨率。
+        // 之前默认拿到 1600x1200@30，摄像头能 open 但没有实际画面，典型是带宽/格式不稳定。
+        int[][] preferred = new int[][]{
+                {640, 480},
+                {800, 600},
+                {960, 540},
+                {1024, 768},
+                {1280, 720},
+                {1280, 960}
+        };
+
+        for (int[] wh : preferred) {
+            for (Size s : supportedSizes) {
+                if (s.width == wh[0] && s.height == wh[1]) {
+                    return s;
+                }
+            }
+        }
+
+        // 没有精确匹配时，选 <=1280x960 的最大分辨率。
+        Size best = null;
+        int bestPixels = 0;
+        for (Size s : supportedSizes) {
+            int pixels = s.width * s.height;
+            if (s.width <= 1280 && s.height <= 960 && pixels > bestPixels) {
+                best = s;
+                bestPixels = pixels;
+            }
+        }
+
+        if (best != null) {
+            return best;
+        }
+
+        // 最后兜底：选最小分辨率，优先保证出画面。
+        Size smallest = supportedSizes.get(0);
+        int smallestPixels = smallest.width * smallest.height;
+        for (Size s : supportedSizes) {
+            int pixels = s.width * s.height;
+            if (pixels < smallestPixels) {
+                smallest = s;
+                smallestPixels = pixels;
+            }
+        }
+        return smallest;
+    }
+
+    private void applyPreviewSizeToSurface(Size size) {
+        if (size == null || cameraView == null) {
+            return;
+        }
+
+        try {
+            cameraView.setAspectRatio(size.width, size.height);
+            cameraView.getHolder().setFixedSize(size.width, size.height);
+            applyRotationAndScale();
+        } catch (Throwable t) {
+            Log.w(TAG, "applyPreviewSizeToSurface failed", t);
         }
     }
 
@@ -881,14 +963,13 @@ public class MainActivity extends Activity implements View.OnClickListener {
                     }
                     cameraHelper.stopPreview();
                     cameraHelper.setPreviewSize(target);
-                    cameraHelper.startPreview();
                     mainHandler.post(new Runnable() {
                         @Override
                         public void run() {
-                            cameraView.setAspectRatio(target.width, target.height);
-                            applyRotationAndScale();
+                            applyPreviewSizeToSurface(target);
                         }
                     });
+                    cameraHelper.startPreview();
                     addPreviewSurfaceIfReady();
                 } catch (Throwable t) {
                     postStatus("切换分辨率失败：" + shortError(t));

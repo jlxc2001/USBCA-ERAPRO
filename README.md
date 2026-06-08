@@ -1,37 +1,15 @@
-# USBCA-ERAPRO UVC v12
+# USBCA-ERAPRO UVC v14
 
-关键修复：Android 对 USB Video Class 设备会额外要求 App 已获得运行时 CAMERA 权限。
+修复：摄像头已经打开，状态显示 `UVC 预览中：1600x1200@30`，但画面黑屏。
 
-你的日志里系统反复输出：
+原因判断：默认分辨率 1600x1200@30 对你的车机/USB2.0 摄像头带宽或格式协商不稳，能 open 但不出帧。
 
-```text
-UsbUserPermissionManager: Camera permission required for USB video class devices
-```
+v14 改动：
+- 启动预览前优先选择低带宽分辨率：640x480 / 800x600 / 960x540 / 1024x768 / 1280x720
+- 对 SurfaceHolder 调用 `setFixedSize(width, height)`
+- 分辨率按钮切换时也同步更新 Surface fixed size
 
-因此即使你点了 USB 弹窗的“允许”，系统仍会把 USB 权限结果判为 denied。
-
-v12 在启动 UVC 前会先请求相机权限。
-
-## 测试流程
-
-1. 卸载旧版。
-2. 安装 v12。
-3. 打开 App，确认标题是 `USBCA-ERAPRO UVC v12 - 相机权限版`。
-4. 点“启动UVC引擎”。
-5. 如果弹“相机权限”，必须允许。
-6. 再点“启动UVC引擎”。
-7. 插入摄像头。
-8. 点“打开UVC”。
-9. USB 弹窗点确定/允许。
-
-
-## v13 lintfix
-
-修复 GitHub Actions release 构建失败：
-
-```text
-ExpiredTargetSdkVersion
-targetSdk 28
-```
-
-这个 APK 是车机侧载使用，不上架 Google Play。为了兼容 Android 10 车机 USB 权限流程，继续保留 `targetSdk 28`，并关闭 release lint 的 `ExpiredTargetSdkVersion` fatal 检查。
+测试：
+1. 启动UVC引擎
+2. 打开UVC
+3. 如果还黑屏，连续点“分辨率”，优先试 640x480 / 800x600
